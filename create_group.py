@@ -133,6 +133,11 @@ async def main(group_title_override=None, group_about_override=None, raw_user_li
             except Exception as e:
                 logging.error(f"❌ Ошибка при добавлении {entry}: {e}")
 
+    # Получение ссылки-приглашения
+    invite = await client.export_chat_invite_link(channel)
+    print(invite)  # передаётся обратно в polling_bot.py
+
+    
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Создание Telegram-группы через Telethon')
     parser.add_argument('--group', help='Название создаваемой группы (переопределяет config)', type=str)
