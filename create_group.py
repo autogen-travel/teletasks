@@ -8,6 +8,8 @@ from telethon.tl.functions.contacts import ResolveUsernameRequest
 from telethon.tl.functions.channels import CreateChannelRequest, InviteToChannelRequest, EditAdminRequest
 from telethon.tl.types import ChatAdminRights
 
+from telethon.tl.functions.messages import ExportChatInviteRequest
+
 # Логирование
 logging.basicConfig(
     level=logging.INFO,
@@ -134,10 +136,10 @@ async def main(group_title_override=None, group_about_override=None, raw_user_li
                 logging.error(f"❌ Ошибка при добавлении {entry}: {e}")
 
     # Получение ссылки-приглашения
-    invite = await client.export_chat_invite_link(channel)
-    print(invite)  # передаётся обратно в polling_bot.py
+    invite = await client(ExportChatInviteRequest(peer=channel))
+    print(invite.link)
 
-    
+
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Создание Telegram-группы через Telethon')
     parser.add_argument('--group', help='Название создаваемой группы (переопределяет config)', type=str)
