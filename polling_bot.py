@@ -1,26 +1,27 @@
-from telegram.ext import Updater, MessageHandler, Filters
 import json
-import subprocess
 import logging
-import os
+import subprocess
+from telegram import Update
+from telegram.ext import ApplicationBuilder, MessageHandler, filters, ContextTypes
 
-with open('api_keys.json', 'r') as f:
-    api_keys = json.load(f)
+# 🔧 Загрузка конфигурации
+with open("api_keys.json", "r") as f:
+    config = json.load(f)
 
-# Вставь токен своего бота
-BOT_TOKEN = api_keys['bot_token']
+BOT_TOKEN = config["bot_token"]
+SCRIPT_PATH = "/root/teletasks/create_group.py"  # укажи путь к своему скрипту
 
-# Путь к вызываемому скрипту
-SCRIPT_PATH = "/create_group.py"
+logging.basicConfig(
+    format="%(asctime)s - %(levelname)s - %(message)s",
+    level=logging.INFO
+)
 
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
-
-def handle_channel_post(update, context):
+# 📩 Обработка новых постов в каналах
+async def handle_channel_post(update: Update, context: ContextTypes.DEFAULT_TYPE):
     post = update.channel_post
     text = post.text or ""
 
-    logger.info(f"Новый пост в канале: {text[:50]}")
+    logging.info(f"📬 Новый пост в канале: {text[:60]}")
 
     try:
         result = subprocess.run(
@@ -29,19 +30,14 @@ def handle_channel_post(update, context):
             stderr=subprocess.STDOUT,
             text=True,
         )
-        logger.info(f"Результат запуска скрипта:\n{result.stdout}")
+        logging.info(f"✅ Скрипт выполнен:\n{result.stdout}")
     except Exception as e:
-        logger.error(f"Ошибка при запуске скрипта: {e}")
+        logging.error(f"❌ Ошибка при запуске скрипта: {e}")
 
-def main():
-    updater = Updater(BOT_TOKEN, use_context=True)
-    dp = updater.dispatcher
+# 🚀 Запуск бота
+if __name__ == "__main__":
+    app = ApplicationBuilder().token(BOT_TOKEN).build()
+    app.add_handler(MessageHandler(filters.UpdateType.CHANNEL_POST, handle_channel_post))
 
-    dp.add_handler(MessageHandler(Filters.update.channel_posts, handle_channel_post))
-
-    logger.info("Бот запущен, ожидание новых постов в канале...")
-    updater.start_polling()
-    updater.idle()
-
-if __name__ == '__main__':
-    main()
+    logging.info("🤖 Бот запущен (polling)...")
+    app.run_polling()
