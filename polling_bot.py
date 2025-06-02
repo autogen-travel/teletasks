@@ -1,11 +1,10 @@
 import json
 import logging
-import subprocess
-import time
 import asyncio
-from telegram import Bot, Update
-from telegram.ext import Application, MessageHandler, filters
-from telegram.constants import ParseMode
+import re
+import subprocess
+from telegram import Update
+from telegram.ext import ApplicationBuilder, ContextTypes, MessageHandler, filters
 
 # Логирование
 logging.basicConfig(
@@ -13,94 +12,85 @@ logging.basicConfig(
     level=logging.INFO
 )
 
-# Загрузка API-ключей
+# Загрузка токена из api_keys.json
 with open('api_keys.json', 'r') as f:
     keys = json.load(f)
+BOT_TOKEN = keys['bot_token']
 
-BOT_TOKEN = keys["bot_token"]
-CHANNEL_USERNAME = f"@{keys['bot_username']}"  # или другое имя, если другой канал
-
-# Глобальный флаг и задача анимации
-edit_task = None
-stop_animation = False
-
-# Анимация статуса "создание группы"
-async def animate_edit(bot: Bot, chat_id, message_id):
-    global stop_animation
-    dots = ["", ".", "..", "...", "..", "."]
-    i = 0
-    while not stop_animation:
-        try:
-            text = f"<i>Создание группы{dots[i % len(dots)]}</i>"
-            await bot.edit_message_text(
-                chat_id=chat_id,
-                message_id=message_id,
-                text=text,
-                parse_mode=ParseMode.HTML
-            )
-            i += 1
-            await asyncio.sleep(0.8)
-        except Exception as e:
-            logging.warning(f"⚠️ Ошибка при обновлении статуса: {e}")
-            break
-
-async def handle_new_post(update: Update, context):
-    global edit_task, stop_animation
-
+async def handle_new_post(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = update.effective_message
     chat_id = message.chat_id
-    message_id = message.message_id
-    task_title = message.text.strip()
+
+    # Получаем текст из message.text или из message.caption (для медиа)
+    task_title = (message.text or message.caption or "Без названия").strip()
 
     logging.info(f"📬 Новый пост в канале: {task_title}")
 
-    # Запускаем анимацию
-    stop_animation = False
-    edit_task = asyncio.create_task(animate_edit(context.bot, chat_id, message_id))
+    stop_animation = asyncio.Event()
 
-    # Запускаем create_group.py
+    async def animate_group_creation():
+        dots = ["", ".", "..", "..."]
+        i = 0
+        while not stop_animation.is_set():
+            try:
+                await context.bot.edit_message_text(
+                    chat_id=chat_id,
+                    message_id=message.message_id,
+                    text=f"Создание группы{dots[i % 4]}"
+                )
+            except Exception as e:
+                logging.warning(f"⚠️ Не удалось обновить сообщение: {e}")
+            await asyncio.sleep(0.5)
+            i += 1
+
+    # Запускаем анимацию
+    animation_task = asyncio.create_task(animate_group_creation())
+
     try:
-        process = subprocess.run(
-            [
-                "python3", "create_group.py",
-                "--group", task_title
-            ],
+        # Запускаем скрипт создания группы, передавая название группы
+        result = subprocess.run(
+            ["python3", "create_group.py", "--group", task_title],
             capture_output=True,
-            text=True
+            text=True,
+            check=True
         )
-        output = process.stdout.strip()
-        logging.info(f"✅ Скрипт выполнен:\n{output}")
-    except Exception as e:
-        logging.error(f"❌ Ошибка при выполнении скрипта: {e}")
-        output = ""
+        logging.info(f"✅ Скрипт выполнен:\n{result.stdout}")
+    except subprocess.CalledProcessError as e:
+        logging.error(f"❌ Ошибка при выполнении скрипта: {e.stderr}")
+        stop_animation.set()
+        await animation_task
+        return
 
     # Останавливаем анимацию
-    stop_animation = True
-    if edit_task:
-        await edit_task
+    stop_animation.set()
+    await animation_task
 
-    # Ищем ссылку в выводе
-    link = next((line for line in output.splitlines() if line.startswith("https://t.me/")), None)
-    if link:
+    # Ищем ссылку на группу в выводе скрипта
+    link_match = re.search(r'(https://t\.me/\S+)', result.stdout)
+    if link_match:
+        invite_link = link_match.group(1)
         try:
             await context.bot.edit_message_text(
                 chat_id=chat_id,
-                message_id=message_id,
-                text=f"{task_title}\n\n🔗 <a href='{link}'>Чат по задаче</a>",
-                parse_mode=ParseMode.HTML
+                message_id=message.message_id,
+                text=f"{task_title}\n\n📎 Ссылка на группу: {invite_link}"
             )
         except Exception as e:
-            logging.warning(f"⚠️ Не удалось отредактировать сообщение: {e}")
+            logging.warning(f"⚠️ Не удалось отредактировать сообщение с ссылкой: {e}")
     else:
         logging.warning("⚠️ Ссылка на группу не найдена в выводе скрипта.")
 
 async def main():
-    application = Application.builder().token(BOT_TOKEN).build()
-    application.add_handler(MessageHandler(filters.ALL, handle_new_post))
+    application = ApplicationBuilder().token(BOT_TOKEN).build()
+
+    # Фильтр сообщений — только новые посты в канале (с текстом или caption)
+    post_filter = filters.UpdateType.CHANNEL_POST & (filters.TEXT | filters.Caption())
+
+    application.add_handler(MessageHandler(post_filter, handle_new_post))
+
     logging.info("🤖 Бот запущен. Ожидание новых постов...")
     await application.run_polling()
 
 if __name__ == '__main__':
-    import nest_asyncio
-    nest_asyncio.apply()
-    asyncio.get_event_loop().run_until_complete(main())
+    import asyncio
+    asyncio.run(main())
