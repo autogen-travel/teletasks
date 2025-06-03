@@ -1,131 +1,132 @@
-import asyncio
 import logging
-import json
-import re
+import asyncio
+from configparser import ConfigParser
+from telethon import TelegramClient, events
+from telethon.tl.functions.channels import CreateChannelRequest, InviteToChannelRequest, EditAdminRequest, GetParticipantRequest
+from telethon.tl.functions.messages import ForwardMessagesRequest, EditMessageRequest
+from telethon.tl.types import (ChannelParticipantsRecent, ChatAdminRights,
+                                ChannelParticipantAdmin, ChannelParticipantCreator)
+from telegram import Bot
+from telegram.constants import ParseMode
 
-from telegram import Update
-from telegram.ext import ApplicationBuilder, ContextTypes, MessageHandler, filters
-from telethon import TelegramClient
-from telethon.tl.functions.channels import CreateChannelRequest, InviteToChannelRequest, EditAdminRequest, GetParticipantsRequest
-from telethon.tl.functions.messages import ExportChatInviteRequest, ForwardMessagesRequest
-from telethon.tl.functions.contacts import ResolveUsernameRequest
-from telethon.tl.types import ChatAdminRights, ChannelParticipantsRecent
-
-# Настройка логгера
+# Настройка логирования
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 # Загрузка конфигурации
-with open('api_keys.json') as f:
-    config = json.load(f)
+config = ConfigParser()
+config.read('config.ini')
 
-api_id = config['api_id']
-api_hash = config['api_hash']
-bot_token = config['bot_token']
-session_name = config['session_name']
+API_ID = config.getint('telethon', 'api_id')
+API_HASH = config.get('telethon', 'api_hash')
+SESSION_NAME = config.get('telethon', 'session')
+BOT_TOKEN = config.get('bot', 'token')
 
-# Инициализация Telethon клиента
-client = TelegramClient(session_name, api_id, api_hash)
+# Инициализация клиентов
+bot = Bot(token=BOT_TOKEN)
+client = TelegramClient(SESSION_NAME, API_ID, API_HASH)
 
+async def get_channel_participants(channel):
+    participants = []
+    async for user in client.iter_participants(channel, filter=ChannelParticipantsRecent):
+        participants.append(user)
+    return participants
 
-async def animate_edit(bot, chat_id, message_id):
-    states = ["\n\u231b \u0418\u0434\u0451\u0442 \u0441\u043e\u0437\u0434\u0430\u043d\u0438\u0435 \u0433\u0440\u0443\u043f\u043f\u044b" + "." * i for i in range(4)]
-    for _ in range(5):
-        for text in states:
-            try:
-                await bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=text, disable_web_page_preview=True)
-                await asyncio.sleep(0.6)
-            except:
-                return
-
-
-async def handle_post(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    message = update.channel_post
-    if not message or not message.text:
+@client.on(events.NewMessage(chats=None))
+async def handler(event):
+    if not event.is_channel or not event.message.message:
         return
 
-    post_text = message.text.strip()
-    channel_id = message.chat.id
-    message_id = message.message_id
+    channel = await event.get_chat()
+    message = event.message
+    original_text = message.message
+    author_id = message.from_id.user_id if message.from_id else None
 
-    # Запускаем анимацию
-    animation_task = asyncio.create_task(animate_edit(context.bot, channel_id, message_id))
+    logging.info(f"📬 Новый пост в канале {channel.title}")
 
+    # Временное обновление поста
+    creating_note = "\n\n⏳ Идёт создание группы..."
     try:
-        await client.start()
+        await bot.edit_message_text(chat_id=channel.id, message_id=message.id, text=original_text + creating_note)
+    except Exception as e:
+        logging.warning(f"Не удалось отредактировать пост: {e}")
 
-        # Получение объекта канала по ID
-        channel_entity = await client.get_entity(channel_id)
-        channel_title = channel_entity.title
-        group_title = f"{channel_title} - {post_text[:200]}"
+    # Название новой группы
+    snippet = original_text[:200].replace('\n', ' ')
+    group_title = f"{channel.title} - {snippet}"
 
-        # Получение автора поста
-        full_message = await client.get_messages(channel_entity, ids=message_id)
-        sender = await full_message.get_sender()
-        sender_id = sender.id
+    # Создание группы
+    result = await client(CreateChannelRequest(
+        title=group_title,
+        about="Группа для обсуждения поста",
+        megagroup=True
+    ))
+    new_group = result.chats[0]
+    logging.info(f"✅ Группа создана: {new_group.title}")
 
-        # Получение подписчиков канала
-        participants = await client(GetParticipantsRequest(
-            channel=channel_entity,
-            filter=ChannelParticipantsRecent(),
-            offset=0,
-            limit=100,
-            hash=0
-        ))
-        users_to_add = [p.participant.user_id for p in participants.users if p.id != sender_id]
-
-        # Создание супергруппы
-        result = await client(CreateChannelRequest(
-            title=group_title,
-            about="Группа, связанная с постом",
-            megagroup=True
-        ))
-        group = result.chats[0]
-
-        # Добавление пользователей
-        for uid in users_to_add:
-            try:
-                await client(InviteToChannelRequest(channel=group, users=[uid]))
-                await asyncio.sleep(1)
-            except:
-                logging.warning(f"Не удалось добавить участника {uid}")
-
-        # Назначение автора поста админом
+    # Добавление участников
+    participants = await get_channel_participants(channel)
+    user_ids = [p.id for p in participants if not p.bot]
+    logging.info(f"👥 Добавляем {len(user_ids)} участников...")
+    for i in range(0, len(user_ids), 10):
         try:
-            rights = ChatAdminRights(
-                change_info=False, post_messages=True, edit_messages=True, delete_messages=True,
-                ban_users=True, invite_users=True, pin_messages=True, add_admins=False,
-                manage_call=True, anonymous=False, manage_topics=True
-            )
-            await client(EditAdminRequest(channel=group, user_id=sender_id, admin_rights=rights, rank="Автор"))
+            await client(InviteToChannelRequest(new_group.id, user_ids[i:i + 10]))
         except Exception as e:
-            logging.warning(f"Не удалось назначить админом: {e}")
+            logging.warning(f"Ошибка при добавлении участников: {e}")
 
-        # Пересылка поста
+    # Назначение автора поста админом
+    if author_id:
+        try:
+            author = await client.get_entity(author_id)
+            participant = await client(GetParticipantRequest(channel=channel, user_id=author.id))
+
+            if isinstance(participant.participant, (ChannelParticipantAdmin, ChannelParticipantCreator)):
+                await client(EditAdminRequest(
+                    channel=new_group,
+                    user_id=author,
+                    admin_rights=ChatAdminRights(
+                        change_info=False,
+                        post_messages=True,
+                        edit_messages=True,
+                        delete_messages=True,
+                        ban_users=True,
+                        invite_users=True,
+                        pin_messages=True,
+                        add_admins=False,
+                        anonymous=False,
+                        manage_call=True,
+                        manage_topics=True
+                    ),
+                    rank="Автор поста"
+                ))
+                logging.info(f"🛡 Назначен админом: @{author.username if author.username else author.id}")
+        except Exception as e:
+            logging.warning(f"❌ Не удалось обработать автора поста: {e}")
+
+    # Пересылка поста в группу
+    try:
         await client(ForwardMessagesRequest(
-            from_peer=channel_entity,
-            to_peer=group,
-            id=[message_id],
+            from_peer=channel,
+            to_peer=new_group,
+            id=[message.id],
             with_my_score=False
         ))
-
-        # Ссылка на группу
-        invite = await client(ExportChatInviteRequest(group))
-        invite_link = invite.link
-
-        # Обновление поста с ссылкой
-        new_text = f"{post_text}\n\n\ud83d\udc49 [\u0421\u0441\u044b\u043b\u043a\u0430 \u043d\u0430 \u0433\u0440\u0443\u043f\u043f\u0443]({invite_link})"
-        await context.bot.edit_message_text(chat_id=channel_id, message_id=message_id, text=new_text, parse_mode="Markdown")
-
+        logging.info("📩 Пост переслан в группу")
     except Exception as e:
-        logging.error(f"Ошибка: {e}")
-        await context.bot.edit_message_text(chat_id=channel_id, message_id=message_id, text=post_text)
-    finally:
-        animation_task.cancel()
-        await client.disconnect()
+        logging.error(f"Ошибка при пересылке: {e}")
 
+    # Обновление оригинального поста с ссылкой
+    group_link = f"https://t.me/c/{str(new_group.id)[4:]}/1"
+    final_text = original_text + f"\n\n➡ Обсуждение: {group_link}"
+    try:
+        await bot.edit_message_text(chat_id=channel.id, message_id=message.id, text=final_text, parse_mode=ParseMode.HTML)
+        logging.info("✏️ Пост обновлён с ссылкой на группу")
+    except Exception as e:
+        logging.warning(f"Не удалось обновить пост: {e}")
+
+async def main():
+    await client.start()
+    logging.info("🤖 Бот запущен")
+    await client.run_until_disconnected()
 
 if __name__ == '__main__':
-    app = ApplicationBuilder().token(bot_token).build()
-    app.add_handler(MessageHandler(filters.UpdateType.CHANNEL_POST & filters.TEXT, handle_post))
-    logging.info("\ud83e\udd16 Бот запущен")
-    app.run_polling()
+    asyncio.run(main())
